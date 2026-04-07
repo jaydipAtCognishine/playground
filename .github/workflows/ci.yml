@@ -1,1 +1,16 @@
 name: My First Workflow
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Say hello
+        run: echo "Workflow is working"
