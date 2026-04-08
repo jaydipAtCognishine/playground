@@ -1,0 +1,155 @@
+# ──────────────────────────────────────────────────────────────────────
+# Workflow: Auto-move task to "Code Review" on review request
+#
+# Trigger : Someone requests (or re-requests) a review on a PR
+# Guard   : PR must be open and non-draft
+# Action  : Find the GitHub Project item linked to the PR and move
+#           it to the configured status column
+# ──────────────────────────────────────────────────────────────────────
+
+name: Move Task to Code Review on Review Request
+
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  CONFIGURE HERE — All repo/project-specific values live below.     ║
+# ║  To adapt this workflow for a different repo or project board,     ║
+# ║  ONLY change values in this env block. Nothing else needs editing. ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+env:
+  # ── GitHub Project (V2) Settings ─────────────────────────────────────
+  PROJECT_NUMBER: "1" # Board number (visible in the project URL)
+  PROJECT_OWNER: "jaydipAtCognishine" # Org or user that owns the project
+  PROJECT_OWNER_TYPE: "cognishine" # "organization" or "user"
+
+  # ── Board Column / Status Configuration ──────────────────────────────
+  TARGET_COLUMN: "Code Review" # Column to move the task into
+  STATUS_FIELD_NAME: "Status" # Name of the single-select status field
+
+  # ── Secrets Reference (must exist in repo Settings → Secrets) ────────
+  # Required secret: PROJECT_PAT
+  #   Classic PAT scopes : repo, project (read:project + write:project)
+  #   Fine-grained scopes: repository access + organization projects r/w
+
+# ───────────────────────────────────────────────────────────────────────
+# END OF CONFIGURATION — nothing below needs to change per-repo
+# ───────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request:
+    types:
+      - review_requested
+
+jobs:
+  move-to-code-review:
+    name: Move task → Code Review
+    runs-on: ubuntu-latest
+
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.state == 'open'
+
+    steps:
+      - name: Fetch project metadata
+        id: project-meta
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+        run: |
+          if [ "$PROJECT_OWNER_TYPE" = "organization" ]; then
+            OWNER_NODE="organization"
+          else
+            OWNER_NODE="user"
+          fi
+
+          META=$(gh api graphql -f query='
+            query($owner: String!, $number: Int!) {
+              '"$OWNER_NODE"'(login: $owner) {
+                projectV2(number: $number) {
+                  id
+                  field(name: "'"$STATUS_FIELD_NAME"'") {
+                    ... on ProjectV2SingleSelectField {
+                      id
+                      options { id name }
+                    }
+                  }
+                }
+              }
+            }
+          ' -f owner="$PROJECT_OWNER" -F number="$PROJECT_NUMBER")
+
+          PROJECT_ID=$(echo "$META" | jq -r ".data.${OWNER_NODE}.projectV2.id")
+          FIELD_ID=$(echo "$META"   | jq -r ".data.${OWNER_NODE}.projectV2.field.id")
+          OPTION_ID=$(echo "$META"  | jq -r \
+            ".data.${OWNER_NODE}.projectV2.field.options[] | select(.name == \"${TARGET_COLUMN}\") | .id")
+
+          if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+            echo "::error::Could not find project #${PROJECT_NUMBER} under ${PROJECT_OWNER}"
+            exit 1
+          fi
+          if [ -z "$OPTION_ID" ] || [ "$OPTION_ID" = "null" ]; then
+            echo "::error::Status option '${TARGET_COLUMN}' not found in field '${STATUS_FIELD_NAME}'"
+            exit 1
+          fi
+
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+          echo "field_id=$FIELD_ID"     >> "$GITHUB_OUTPUT"
+          echo "option_id=$OPTION_ID"   >> "$GITHUB_OUTPUT"
+
+      - name: Find project item linked to PR
+        id: find-item
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+        run: |
+          ITEMS=$(gh api graphql -f query='
+            query($repoOwner: String!, $repoName: String!, $prNumber: Int!) {
+              repository(owner: $repoOwner, name: $repoName) {
+                pullRequest(number: $prNumber) {
+                  projectItems(first: 20) {
+                    nodes {
+                      id
+                      project { id }
+                    }
+                  }
+                }
+              }
+            }
+          ' \
+            -f repoOwner="${{ github.repository_owner }}" \
+            -f repoName="${{ github.event.repository.name }}" \
+            -F prNumber="${{ github.event.pull_request.number }}")
+
+          TARGET_PROJECT="${{ steps.project-meta.outputs.project_id }}"
+
+          ITEM_ID=$(echo "$ITEMS" | jq -r \
+            ".data.repository.pullRequest.projectItems.nodes[]
+             | select(.project.id == \"${TARGET_PROJECT}\") | .id")
+
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+            echo "::warning::PR #${{ github.event.pull_request.number }} is not linked to project #${PROJECT_NUMBER}. Skipping."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "item_id=$ITEM_ID" >> "$GITHUB_OUTPUT"
+            echo "found=true"       >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Move task to Code Review column
+        if: steps.find-item.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+        run: |
+          gh api graphql -f query='
+            mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId
+                itemId:    $itemId
+                fieldId:   $fieldId
+                value:     { singleSelectOptionId: $optionId }
+              }) {
+                projectV2Item { id }
+              }
+            }
+          ' \
+            -f projectId="${{ steps.project-meta.outputs.project_id }}" \
+            -f itemId="${{ steps.find-item.outputs.item_id }}" \
+            -f fieldId="${{ steps.project-meta.outputs.field_id }}" \
+            -f optionId="${{ steps.project-meta.outputs.option_id }}"
+
+          echo "Moved task to '${TARGET_COLUMN}' column"
