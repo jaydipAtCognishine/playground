@@ -51,7 +51,7 @@ jobs:
       - name: Fetch project metadata
         id: project-meta
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
         run: |
           if [ "$PROJECT_OWNER_TYPE" = "organization" ]; then
             OWNER_NODE="organization"
@@ -96,7 +96,7 @@ jobs:
       - name: Find project item linked to PR
         id: find-item
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
         run: |
           ITEMS=$(gh api graphql -f query='
             query($repoOwner: String!, $repoName: String!, $prNumber: Int!) {
@@ -133,7 +133,7 @@ jobs:
       - name: Move task to Code Review column
         if: steps.find-item.outputs.found == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
         run: |
           gh api graphql -f query='
             mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
