@@ -1,0 +1,205 @@
+# ──────────────────────────────────────────────────────────────────────
+# Workflow: Auto-move task to "Feedbacks given" on review changes request
+#
+# Trigger : Someone submits a "Request changes" review on a PR
+# Guard   : PR must be open and non-draft; task must currently be in
+#           the SOURCE_COLUMN ("Code Review") before moving
+# Action  : Find the issue linked to the PR (via Development section),
+#           verify it is in SOURCE_COLUMN, then move it to
+#           FEEDBACK_COLUMN ("Feedbacks given")
+# ──────────────────────────────────────────────────────────────────────
+
+name: Move Task to Feedbacks Given on Changes Requested
+
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  CONFIGURE HERE — All repo/project-specific values live below.     ║
+# ║  To adapt this workflow for a different repo or project board,     ║
+# ║  ONLY change values in this env block. Nothing else needs editing. ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+env:
+  # ── GitHub Project (V2) Settings ─────────────────────────────────────
+  PROJECT_NUMBER: "1" # Board number (visible in the project URL)
+  PROJECT_OWNER: "jaydipAtCognishine" # Org or user that owns the project
+  PROJECT_OWNER_TYPE: "user" # "organization" or "user"
+
+  # ── Board Column / Status Configuration ──────────────────────────────
+  SOURCE_COLUMN: "Code Review" # Only move if task is currently in this column
+  FEEDBACK_COLUMN: "PR Feedbacks given" # Column to move the task into
+  STATUS_FIELD_NAME: "Status" # Name of the single-select status field
+
+  # ── Secrets Reference (must exist in repo Settings → Secrets) ────────
+  # Required secret: PROJECT_PAT
+  #   Classic PAT scopes : repo, project (read:project + write:project)
+  #   Fine-grained scopes: repository access + organization projects r/w
+
+# ───────────────────────────────────────────────────────────────────────
+# END OF CONFIGURATION — nothing below needs to change per-repo
+# ───────────────────────────────────────────────────────────────────────
+
+on:
+  pull_request_review:
+    types:
+      - submitted
+
+jobs:
+  move-to-feedbacks-given:
+    name: Move task → Feedbacks given
+    runs-on: ubuntu-latest
+
+    # Only act when: review requests changes + PR is open and non-draft
+    if: >-
+      github.event.review.state == 'changes_requested' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.state == 'open'
+
+    steps:
+      # ── Step 1: Fetch project ID, status field ID, and both option IDs ──
+      - name: Fetch project metadata
+        id: project-meta
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+        run: |
+          if [ "$PROJECT_OWNER_TYPE" = "organization" ]; then
+            OWNER_NODE="organization"
+          else
+            OWNER_NODE="user"
+          fi
+
+          META=$(gh api graphql -f query='
+            query($owner: String!, $number: Int!) {
+              '"$OWNER_NODE"'(login: $owner) {
+                projectV2(number: $number) {
+                  id
+                  field(name: "'"$STATUS_FIELD_NAME"'") {
+                    ... on ProjectV2SingleSelectField {
+                      id
+                      options { id name }
+                    }
+                  }
+                }
+              }
+            }
+          ' -f owner="$PROJECT_OWNER" -F number="$PROJECT_NUMBER")
+
+          PROJECT_ID=$(echo "$META"  | jq -r ".data.${OWNER_NODE}.projectV2.id")
+          FIELD_ID=$(echo "$META"    | jq -r ".data.${OWNER_NODE}.projectV2.field.id")
+
+          # Resolve option ID for the destination column
+          FEEDBACK_OPTION_ID=$(echo "$META" | jq -r \
+            ".data.${OWNER_NODE}.projectV2.field.options[] | select(.name == \"${FEEDBACK_COLUMN}\") | .id")
+
+          # Resolve option ID for the source column (used to guard the move)
+          SOURCE_OPTION_ID=$(echo "$META" | jq -r \
+            ".data.${OWNER_NODE}.projectV2.field.options[] | select(.name == \"${SOURCE_COLUMN}\") | .id")
+
+          if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+            echo "::error::Could not find project #${PROJECT_NUMBER} under ${PROJECT_OWNER}"
+            exit 1
+          fi
+          if [ -z "$FEEDBACK_OPTION_ID" ] || [ "$FEEDBACK_OPTION_ID" = "null" ]; then
+            echo "::error::Status option '${FEEDBACK_COLUMN}' not found in field '${STATUS_FIELD_NAME}'"
+            exit 1
+          fi
+          if [ -z "$SOURCE_OPTION_ID" ] || [ "$SOURCE_OPTION_ID" = "null" ]; then
+            echo "::error::Status option '${SOURCE_COLUMN}' not found in field '${STATUS_FIELD_NAME}'"
+            exit 1
+          fi
+
+          echo "project_id=$PROJECT_ID"               >> "$GITHUB_OUTPUT"
+          echo "field_id=$FIELD_ID"                   >> "$GITHUB_OUTPUT"
+          echo "feedback_option_id=$FEEDBACK_OPTION_ID" >> "$GITHUB_OUTPUT"
+          echo "source_option_id=$SOURCE_OPTION_ID"   >> "$GITHUB_OUTPUT"
+
+      # ── Step 2: Find linked issue's project item and check current status ──
+      - name: Find linked issue and verify current column
+        id: find-item
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          TARGET_PROJECT="${{ steps.project-meta.outputs.project_id }}"
+          SOURCE_OPTION="${{ steps.project-meta.outputs.source_option_id }}"
+          FIELD_ID="${{ steps.project-meta.outputs.field_id }}"
+
+          RESULT=$(gh api graphql -f query='
+            query($repoOwner: String!, $repoName: String!, $prNumber: Int!, $fieldId: ID!) {
+              repository(owner: $repoOwner, name: $repoName) {
+                pullRequest(number: $prNumber) {
+                  closingIssuesReferences(first: 10) {
+                    nodes {
+                      number
+                      projectItems(first: 20) {
+                        nodes {
+                          id
+                          project { id }
+                          fieldValueByName(name: "Status") {
+                            ... on ProjectV2ItemFieldSingleSelectValue {
+                              optionId
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ' \
+            -f repoOwner="$REPO_OWNER" \
+            -f repoName="$REPO_NAME" \
+            -F prNumber="$PR_NUMBER" \
+            -f fieldId="$FIELD_ID")
+
+          # Find the project item for our target project
+          ITEM=$(echo "$RESULT" | jq -r \
+            "[.data.repository.pullRequest.closingIssuesReferences.nodes[]
+              .projectItems.nodes[]
+              | select(.project.id == \"${TARGET_PROJECT}\")] | first")
+
+          ITEM_ID=$(echo "$ITEM"        | jq -r '.id')
+          CURRENT_OPTION=$(echo "$ITEM" | jq -r '.fieldValueByName.optionId')
+          CURRENT_NAME=$(echo "$ITEM"   | jq -r '.fieldValueByName.name')
+
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
+            echo "::warning::No linked issue with a project item found for PR #${PR_NUMBER}. Skipping."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Guard: only move if the task is currently in SOURCE_COLUMN
+          if [ "$CURRENT_OPTION" != "$SOURCE_OPTION" ]; then
+            echo "::notice::Task is currently in '${CURRENT_NAME}', not '${SOURCE_COLUMN}'. Skipping move."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "item_id=$ITEM_ID" >> "$GITHUB_OUTPUT"
+          echo "found=true"       >> "$GITHUB_OUTPUT"
+
+      # ── Step 3: Move the task to the feedback column ─────────────────────
+      - name: Move task to Feedbacks given column
+        if: steps.find-item.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+        run: |
+          gh api graphql -f query='
+            mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId
+                itemId:    $itemId
+                fieldId:   $fieldId
+                value:     { singleSelectOptionId: $optionId }
+              }) {
+                projectV2Item { id }
+              }
+            }
+          ' \
+            -f projectId="${{ steps.project-meta.outputs.project_id }}" \
+            -f itemId="${{ steps.find-item.outputs.item_id }}" \
+            -f fieldId="${{ steps.project-meta.outputs.field_id }}" \
+            -f optionId="${{ steps.project-meta.outputs.feedback_option_id }}"
+
+          echo "Moved task to '${FEEDBACK_COLUMN}' column"
