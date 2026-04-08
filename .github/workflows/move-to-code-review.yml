@@ -3,8 +3,9 @@
 #
 # Trigger : Someone requests (or re-requests) a review on a PR
 # Guard   : PR must be open and non-draft
-# Action  : Find the GitHub Project item linked to the PR and move
-#           it to the configured status column
+# Action  : Find the issue linked to the PR (via Development section),
+#           look up that issue's project item, and move it to the
+#           configured status column
 # ──────────────────────────────────────────────────────────────────────
 
 name: Move Task to Code Review on Review Request
@@ -93,37 +94,46 @@ jobs:
           echo "field_id=$FIELD_ID"     >> "$GITHUB_OUTPUT"
           echo "option_id=$OPTION_ID"   >> "$GITHUB_OUTPUT"
 
-      - name: Find project item linked to PR
+      - name: Find linked issue and its project item
         id: find-item
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
         run: |
-          ITEMS=$(gh api graphql -f query='
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          TARGET_PROJECT="${{ steps.project-meta.outputs.project_id }}"
+
+          RESULT=$(gh api graphql -f query='
             query($repoOwner: String!, $repoName: String!, $prNumber: Int!) {
               repository(owner: $repoOwner, name: $repoName) {
                 pullRequest(number: $prNumber) {
-                  projectItems(first: 20) {
+                  closingIssuesReferences(first: 10) {
                     nodes {
-                      id
-                      project { id }
+                      number
+                      projectItems(first: 20) {
+                        nodes {
+                          id
+                          project { id }
+                        }
+                      }
                     }
                   }
                 }
               }
             }
           ' \
-            -f repoOwner="${{ github.repository_owner }}" \
-            -f repoName="${{ github.event.repository.name }}" \
-            -F prNumber="${{ github.event.pull_request.number }}")
+            -f repoOwner="$REPO_OWNER" \
+            -f repoName="$REPO_NAME" \
+            -F prNumber="$PR_NUMBER")
 
-          TARGET_PROJECT="${{ steps.project-meta.outputs.project_id }}"
-
-          ITEM_ID=$(echo "$ITEMS" | jq -r \
-            ".data.repository.pullRequest.projectItems.nodes[]
-             | select(.project.id == \"${TARGET_PROJECT}\") | .id")
+          ITEM_ID=$(echo "$RESULT" | jq -r \
+            "[.data.repository.pullRequest.closingIssuesReferences.nodes[]
+              .projectItems.nodes[]
+              | select(.project.id == \"${TARGET_PROJECT}\")] | first | .id")
 
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-            echo "::warning::PR #${{ github.event.pull_request.number }} is not linked to project #${PROJECT_NUMBER}. Skipping."
+            echo "::warning::No linked issue with a project item found for PR #${PR_NUMBER}. Skipping."
             echo "found=false" >> "$GITHUB_OUTPUT"
           else
             echo "item_id=$ITEM_ID" >> "$GITHUB_OUTPUT"
