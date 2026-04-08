@@ -18,7 +18,7 @@ env:
   # ── GitHub Project (V2) Settings ─────────────────────────────────────
   PROJECT_NUMBER: "1" # Board number (visible in the project URL)
   PROJECT_OWNER: "jaydipAtCognishine" # Org or user that owns the project
-  PROJECT_OWNER_TYPE: "cognishine" # "organization" or "user"
+  PROJECT_OWNER_TYPE: "user" # "organization" or "user"
 
   # ── Board Column / Status Configuration ──────────────────────────────
   TARGET_COLUMN: "Code Review" # Column to move the task into
