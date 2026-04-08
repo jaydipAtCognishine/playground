@@ -51,7 +51,7 @@ jobs:
       - name: Fetch project metadata
         id: project-meta
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "$PROJECT_OWNER_TYPE" = "organization" ]; then
             OWNER_NODE="organization"
