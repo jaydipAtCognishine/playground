@@ -124,7 +124,7 @@ jobs:
           FIELD_ID="${{ steps.project-meta.outputs.field_id }}"
 
           RESULT=$(gh api graphql -f query='
-            query($repoOwner: String!, $repoName: String!, $prNumber: Int!, $fieldId: ID!) {
+            query($repoOwner: String!, $repoName: String!, $prNumber: Int!) {
               repository(owner: $repoOwner, name: $repoName) {
                 pullRequest(number: $prNumber) {
                   closingIssuesReferences(first: 10) {
@@ -150,8 +150,7 @@ jobs:
           ' \
             -f repoOwner="$REPO_OWNER" \
             -f repoName="$REPO_NAME" \
-            -F prNumber="$PR_NUMBER" \
-            -f fieldId="$FIELD_ID")
+            -F prNumber="$PR_NUMBER")
 
           # Find the project item for our target project
           ITEM=$(echo "$RESULT" | jq -r \
